@@ -32,6 +32,17 @@ services:
     volumes:
       - ./my-realm.json:/opt/keycloak/data/import/my-realm.json
 
+  app:
+    build:
+      context: ..
+      dockerfile: deployments/app.Dockerfile
+    environment:
+      PORT: "8081"
+      ISSUER: http://localhost:8080/realms/my-realm
+      CLIENT_ID: my-client
+      CLIENT_SECRET: W3aCgDs5SN7LED5akIk0yyq9DXzCeznJ
+    network_mode: host
+
 volumes:
   postgres_data:
     driver: local
