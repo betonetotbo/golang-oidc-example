@@ -4,19 +4,17 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/betonetotbo/golang-oidc-example/internal/auth"
 	"github.com/betonetotbo/golang-oidc-example/internal/html"
 	"github.com/dgrijalva/jwt-go"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
-
-	"github.com/coreos/go-oidc/v3/oidc"
-	"golang.org/x/net/context"
-	"golang.org/x/oauth2"
 )
 
 var (
@@ -46,124 +44,62 @@ func setCookie(w http.ResponseWriter, r *http.Request, name, value string) {
 }
 
 func main() {
-	ctx := context.Background()
-
-	provider, err := oidc.NewProvider(ctx, issuer)
-	if err != nil {
-		log.Fatal(err)
-	}
-	oidcConfig := &oidc.Config{
-		ClientID: clientID,
-	}
-	verifier := provider.Verifier(oidcConfig)
-
-	config := oauth2.Config{
-		ClientID:     clientID,
+	authOidc := auth.NewOidc(&auth.OidcConfig{
+		Issuer:       issuer,
+		ClientId:     clientID,
 		ClientSecret: clientSecret,
-		Endpoint:     provider.Endpoint(),
-		RedirectURL:  fmt.Sprintf("http://localhost:%s/auth", port),
-		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
-	}
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		state, err := randString(16)
-		if err != nil {
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-		nonce, err := randString(16)
-		if err != nil {
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
-		}
-		setCookie(w, r, "state", state)
-		setCookie(w, r, "nonce", nonce)
-
-		http.Redirect(w, r, config.AuthCodeURL(state, oidc.Nonce(nonce)), http.StatusFound)
+		Scopes:       []string{"openid"},
+		RedirectUri:  fmt.Sprintf("http://localhost:%s/auth", port),
 	})
 
-	http.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
-		state, err := r.Cookie("state")
-		if err != nil {
-			http.Error(w, "state not found", http.StatusBadRequest)
-			return
+	r := chi.NewRouter()
+
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(authOidc.NewMiddleware(func(r *http.Request) bool {
+		switch r.URL.Path {
+		case "/", "/login", "/auth", "/backchannel-logout":
+			return true
 		}
-		if r.URL.Query().Get("state") != state.Value {
-			http.Error(w, "state did not match", http.StatusBadRequest)
-			return
+		return false
+	}))
+
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		_, tokens := authOidc.IsAuthorized(r)
+		data := map[string]any{}
+		if tokens != nil {
+			data["name"] = tokens.GetClaims(tokens.AccessToken)["name"].(string)
+			data["authorized"] = true
 		}
 
-		oauth2Token, err := config.Exchange(ctx, r.URL.Query().Get("code"))
+		err := html.RenderTemplate(w, r, "index", data)
 		if err != nil {
-			http.Error(w, "Failed to exchange token: "+err.Error(), http.StatusInternalServerError)
-			return
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(err.Error()))
 		}
-		rawIDToken, ok := oauth2Token.Extra("id_token").(string)
-		if !ok {
-			http.Error(w, "No id_token field in oauth2 token.", http.StatusInternalServerError)
-			return
-		}
-		idToken, err := verifier.Verify(ctx, rawIDToken)
-		if err != nil {
-			http.Error(w, "Failed to verify ID Token: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		nonce, err := r.Cookie("nonce")
-		if err != nil {
-			http.Error(w, "nonce not found", http.StatusBadRequest)
-			return
-		}
-		if idToken.Nonce != nonce.Value {
-			http.Error(w, "nonce did not match", http.StatusBadRequest)
-			return
-		}
-
-		setCookie(w, r, "access_token", oauth2Token.AccessToken)
-		setCookie(w, r, "refresh_token", oauth2Token.RefreshToken)
-		setCookie(w, r, "id_token", rawIDToken)
-
-		http.Redirect(w, r, "/protected", http.StatusFound)
 	})
-
-	http.HandleFunc("/protected", func(w http.ResponseWriter, r *http.Request) {
-		rawIDToken, err := r.Cookie("id_token")
-		if errors.Is(err, http.ErrNoCookie) {
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
-		}
-		idToken, err := verifier.Verify(r.Context(), rawIDToken.Value)
-		if err != nil {
-			log.Println("Invalid IDToken")
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
-		}
-
-		rawAccessToken, err := r.Cookie("access_token")
-		if errors.Is(err, http.ErrNoCookie) {
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
-		}
-
-		err = idToken.VerifyAccessToken(rawAccessToken.Value)
-		if err != nil {
-			http.Redirect(w, r, "/", http.StatusFound)
-			return
-		}
+	r.Get("/login", authOidc.RedirectAuth)
+	r.Get("/auth", authOidc.ExchangeToken("/protected"))
+	r.Post("/backchannel-logout", authOidc.BackChannelLogout)
+	r.Get("/protected", func(w http.ResponseWriter, r *http.Request) {
+		tokens := r.Context().Value(auth.TokensContextValue).(*auth.Tokens)
 
 		claims := jwt.MapClaims{}
-		_, _, _ = new(jwt.Parser).ParseUnverified(rawAccessToken.Value, claims)
+		_, _, _ = new(jwt.Parser).ParseUnverified(tokens.AccessToken, claims)
 		rawValue, _ := json.MarshalIndent(claims, "", "   ")
 		claims["rawValue"] = string(rawValue)
 
-		w.WriteHeader(http.StatusOK)
-		html.RenderTemplate(w, r, "protected", claims)
+		err := html.RenderTemplate(w, r, "protected", claims)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(err.Error()))
+		}
 	})
-
-	http.HandleFunc("/backchannel-logout", func(w http.ResponseWriter, r *http.Request) {
-		log.Println(r.FormValue("logout_token"))
-	})
+	r.Get("/logout", authOidc.Logout("/", false))
+	r.Get("/signout", authOidc.Logout(fmt.Sprintf("http://localhost:%s", port), true))
 
 	log.Printf("listening on http://localhost:%s/", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Fatal(http.ListenAndServe(":"+port, r))
 }

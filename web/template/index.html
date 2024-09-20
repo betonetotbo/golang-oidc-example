@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <h1>OIDC example</h1>
+    {{if not .model.authorized}}
+    <p>Click here to <a href="/login">login</a></p>
+    {{else}}
+    <p>Wellcome <strong>{{.model.name}}</strong>, go to <a href="/protected">protected</a> area</p>
+    <ul>
+        <li><a href="/logout">Logout</a> - Just logout at this app</li>
+        <li><a href="/signout">Signout</a> - Logout from this app and from Keycloak</li>
+    </ul>
+    {{end}}
+</body>
+</html>
