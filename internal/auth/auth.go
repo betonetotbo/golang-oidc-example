@@ -130,19 +130,24 @@ func (o *Oidc) IsAuthorized(r *http.Request) (bool, *Tokens) {
 	claims := parseClaims(tokens.AccessToken)
 	sid := claims["sid"].(string)
 	if _, found := o.sidBanlist.Get(sid); found {
+		log.Printf("Token valid but banned SID: %s", sid)
 		return false, nil
 	}
 	return true, tokens
 }
 
-func (o *Oidc) NewMiddleware(ignore func(*http.Request) bool) func(http.Handler) http.Handler {
+func (o *Oidc) NewMiddleware(ignore func(*http.Request) bool, redirectOnDenied string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !ignore(r) {
 				o.init()
 				ok, tokens := o.IsAuthorized(r)
 				if !ok {
-					w.WriteHeader(http.StatusUnauthorized)
+					if redirectOnDenied != "" {
+						http.Redirect(w, r, redirectOnDenied, http.StatusFound)
+					} else {
+						w.WriteHeader(http.StatusUnauthorized)
+					}
 					return
 				}
 				ctx := r.Context()
@@ -216,6 +221,9 @@ func (o *Oidc) ExchangeToken(redirectTo string) http.HandlerFunc {
 		setCookie(w, r, "refresh_token", oauth2Token.RefreshToken)
 		setCookie(w, r, "id_token", rawIDToken)
 
+		claims := parseClaims(oauth2Token.AccessToken)
+		log.Printf("Token exchanged for SID: %s", claims["sid"])
+
 		http.Redirect(w, r, redirectTo, http.StatusFound)
 	}
 }
@@ -229,7 +237,10 @@ func (o *Oidc) BackChannelLogout(w http.ResponseWriter, r *http.Request) {
 
 	exp := claims["exp"].(float64)
 	expTime := time.Unix(int64(exp), 0)
-	o.sidBanlist.Set(claims["sid"].(string), claims["sub"], expTime.Sub(time.Now()))
+	sid := claims["sid"].(string)
+	o.sidBanlist.Set(sid, claims["sub"], expTime.Sub(time.Now()))
+
+	log.Printf("BackChannelLogout: SID %s banned", sid)
 }
 
 func (o *Oidc) Logout(redirectTo string, endSession bool) http.HandlerFunc {

@@ -42,7 +42,7 @@ func main() {
 			return true
 		}
 		return false
-	}))
+	}, "/"))
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		_, tokens := authOidc.IsAuthorized(r)
