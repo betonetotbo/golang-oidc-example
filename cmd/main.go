@@ -1,20 +1,17 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"os"
+
 	"github.com/betonetotbo/golang-oidc-example/internal/auth"
 	"github.com/betonetotbo/golang-oidc-example/internal/html"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"time"
 )
 
 var (
